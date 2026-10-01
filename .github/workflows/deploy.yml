@@ -28,4 +28,4 @@ jobs:
           credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
 
       - name: Publicar app y reglas de seguridad
-        run: npx --yes firebase-tools@latest deploy --only hosting,firestore:rules --project tickets-8e88b --non-interactive
+        run: npx --yes firebase-tools@latest deploy --only hosting, --project tickets-8e88b --non-interactive
