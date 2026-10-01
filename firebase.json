@@ -1,0 +1,28 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "hosting": {
+    "public": "public",
+    "ignore": [
+      "**/.*"
+    ],
+    "headers": [
+      {
+        "source": "**/*.@(js|html|webmanifest)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "/t/**",
+        "destination": "/ticket.html"
+      }
+    ]
+  }
+}

@@ -1,0 +1,145 @@
+rules_version = '2';
+
+// Reglas de seguridad de Caja de Bolsillo.
+// - Solo empleados dados de alta (colección "usuarios", activo = true) pueden usar el sistema.
+// - Solo administradores cambian productos, datos del negocio, empleados y cancelan tickets.
+// - Los folios son consecutivos y nunca se repiten: el contador y el ticket se escriben juntos.
+// - Los tickets nunca se borran.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function me() { return get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data; }
+    function isActive() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
+        && me().activo == true;
+    }
+    function isAdmin() { return isActive() && me().rol == 'admin'; }
+
+    // Marca de "sistema ya configurado". Se lee sin sesión para saber si mostrar la pantalla de primer uso.
+    match /sistema/init {
+      allow read: if true;
+      allow create: if signedIn()
+        && !exists(/databases/$(database)/documents/sistema/init)
+        && existsAfter(/databases/$(database)/documents/usuarios/$(request.auth.uid))
+        && request.resource.data.creadoPor == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /usuarios/{uid} {
+      allow read: if isActive() && (request.auth.uid == uid || isAdmin());
+      // Primer administrador (solo mientras el sistema no está configurado) o alta hecha por un admin.
+      allow create: if (
+          signedIn() && request.auth.uid == uid
+          && !exists(/databases/$(database)/documents/sistema/init)
+          && existsAfter(/databases/$(database)/documents/sistema/init)
+          && request.resource.data.rol == 'admin'
+          && request.resource.data.activo == true
+        ) || (
+          isAdmin() && request.resource.data.rol in ['admin', 'cajero']
+        );
+      // Un admin no puede quitarse a sí mismo el acceso ni el rol (evita quedarse sin administradores).
+      allow update: if isAdmin() && request.resource.data.rol in ['admin', 'cajero']
+        && (uid != request.auth.uid || (request.resource.data.rol == 'admin' && request.resource.data.activo == true));
+      allow delete: if false;
+    }
+
+    match /config/{doc} {
+      allow read: if isActive();
+      allow write: if isAdmin();
+    }
+
+    match /productos/{id} {
+      allow read: if isActive();
+      allow create, update: if isAdmin()
+        && request.resource.data.nombre is string && request.resource.data.nombre.size() > 0
+        && request.resource.data.precio is number && request.resource.data.precio >= 0;
+      allow delete: if isAdmin();
+    }
+
+    // Contador de folios: solo sube de 1 en 1 y solo junto con el ticket de ese folio.
+    match /contadores/folio {
+      allow read: if isActive();
+      allow create: if isActive()
+        && request.resource.data.ultimo == 1
+        && existsAfter(/databases/$(database)/documents/tickets/1);
+      allow update: if isActive()
+        && request.resource.data.ultimo == resource.data.ultimo + 1
+        && existsAfter(/databases/$(database)/documents/tickets/$(string(request.resource.data.ultimo)));
+      allow delete: if false;
+    }
+
+    // Copia pública de cada ticket para el link que se manda al cliente.
+    // Solo se puede abrir conociendo el código exacto del link (no se pueden listar).
+    match /publicos/{tk} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if isActive()
+        && tk.size() >= 16
+        && request.resource.data.folio is int
+        && request.resource.data.lineas is list
+        && request.resource.data.estado in ['pagado', 'cancelado'];
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado', 'canceladoEn'])
+        && request.resource.data.estado == 'cancelado';
+      allow delete: if false;
+    }
+
+    // Solicitudes de factura. El id es el código del link del ticket (una solicitud por ticket).
+    // El cliente la crea o corrige desde su ticket digital; el personal la ve y la marca como facturada.
+    function datosFiscalesOk(d) {
+      return d.keys().hasOnly(['rfc', 'razonSocial', 'cp', 'email', 'regimen', 'usoCfdi', 'folio', 'total', 'metodo',
+                               'fechaVenta', 'dia', 'estado', 'origen', 'creadoEn', 'capturo', 'actualizado'])
+        && d.rfc is string && d.rfc.size() >= 12 && d.rfc.size() <= 13
+        && d.razonSocial is string && d.razonSocial.size() >= 3 && d.razonSocial.size() <= 300
+        && d.cp is string && d.cp.size() == 5
+        && d.email is string && d.email.size() <= 200
+        && d.regimen is string && d.regimen.size() == 3
+        && d.usoCfdi is string && d.usoCfdi.size() <= 4;
+    }
+    function coincideConTicket(tk, d) {
+      return exists(/databases/$(database)/documents/publicos/$(tk))
+        && d.folio == get(/databases/$(database)/documents/publicos/$(tk)).data.folio
+        && d.total == get(/databases/$(database)/documents/publicos/$(tk)).data.total;
+    }
+    match /facturas/{tk} {
+      allow get: if true;                 // solo quien tiene el link exacto
+      allow list: if isAdmin();
+      allow create: if request.resource.data.estado == 'pendiente'
+        && datosFiscalesOk(request.resource.data)
+        && coincideConTicket(tk, request.resource.data)
+        && (request.resource.data.origen == 'cliente' || isActive());
+      // El cliente (o un empleado) puede corregir mientras siga pendiente.
+      allow update: if (resource.data.estado == 'pendiente'
+          && request.resource.data.estado == 'pendiente'
+          && request.resource.data.folio == resource.data.folio
+          && request.resource.data.total == resource.data.total
+          && datosFiscalesOk(request.resource.data))
+        // Marcar como facturada (o regresarla): solo el administrador.
+        || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Datos fiscales de clientes frecuentes, para autollenar por RFC. Solo el personal.
+    match /clientesFiscales/{rfc} {
+      allow read, write: if isActive();
+    }
+
+    match /tickets/{ticketId} {
+      allow read: if isActive();
+      allow create: if isActive()
+        && request.resource.data.folio is int
+        && ticketId == string(request.resource.data.folio)
+        && getAfter(/databases/$(database)/documents/contadores/folio).data.ultimo == request.resource.data.folio
+        && request.resource.data.vendedorUid == request.auth.uid
+        && request.resource.data.estado == 'pagado'
+        && request.resource.data.items is list && request.resource.data.items.size() > 0;
+      // Cancelar: solo admin, y solo se tocan los campos de cancelación.
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado', 'canceladoPor', 'canceladoEn', 'motivo'])
+        && request.resource.data.estado == 'cancelado';
+      allow delete: if false;
+    }
+  }
+}
