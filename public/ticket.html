@@ -47,9 +47,9 @@ button.cta{border:0;cursor:pointer;font:inherit;font-weight:700;font-size:17px}
 <main id="m"><p class="msg">Cargando tu ticket…</p></main>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
-import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js";
 import { firebaseConfig } from "/firebase-config.js";
-import { formHTML, leerForm, validar } from "/fiscal.js";
+import { formHTML, leerForm, validar, formatoListo, enviarContador } from "/fiscal.js";
 const m = document.getElementById("m");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = n => new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(n || 0);
@@ -85,13 +85,16 @@ async function factura(db, t) {
   const ref = doc(db, "facturas", tk);
   let f = null;
   try { const s = await getDoc(ref); if (s.exists()) f = s.data(); } catch (e) {}
+  // Formato del contador: si está conectado, la solicitud se manda a su formulario en cuanto se pide.
+  let formato = null;
+  try { const s = await getDoc(doc(db, "publico", "formato")); if (s.exists()) formato = s.data(); } catch (e) {}
   const estado = () => {
     if (f && f.estado === "facturada") { box.innerHTML = `<div class="ok">Tu factura ya fue emitida y se envió a <b>${esc(f.email)}</b>.</div>`; return; }
-    if (f) { box.innerHTML = `<div class="ok">Recibimos tu solicitud de factura para <b>${esc(f.razonSocial)}</b> (${esc(f.rfc)}). Te llegará a <b>${esc(f.email)}</b>.</div><button class="sec" id="fEdit">Corregir mis datos</button>`; document.getElementById("fEdit").onclick = form; return; }
+    if (f) { box.innerHTML = `<div class="ok">Recibimos tu solicitud de factura para <b>${esc(f.razonSocial)}</b> (${esc(f.rfc)}). Te llegará a <b>${esc(f.email)}</b>.</div>${f.contador ? `<p class="promo" style="margin:0">Tu solicitud ya está con facturación. Si necesitas corregir un dato, comunícate con la tienda.</p>` : `<button class="sec" id="fEdit">Corregir mis datos</button>`}`; const ed = document.getElementById("fEdit"); if (ed) ed.onclick = form; return; }
     box.innerHTML = `<button class="sec" id="fOpen">¿Necesitas factura? Solicítala aquí</button>`; document.getElementById("fOpen").onclick = form;
   };
   const form = () => {
-    box.innerHTML = `<form id="fForm" class="card" autocomplete="off"><strong class="ft">Solicitar factura</strong>${formHTML(f || {})}<div class="err" id="fErr"></div><button class="cta" type="submit">Enviar solicitud</button><button class="sec" type="button" id="fCancel">Cancelar</button></form>`;
+    box.innerHTML = `<form id="fForm" class="card" autocomplete="off"><strong class="ft">Solicitar factura</strong>${formHTML(f || {}, t.metodo || "")}<div class="err" id="fErr"></div><button class="cta" type="submit">Enviar solicitud</button><button class="sec" type="button" id="fCancel">Cancelar</button></form>`;
     document.getElementById("fCancel").onclick = estado;
     document.getElementById("fForm").addEventListener("input", () => { document.getElementById("fErr").textContent = ""; });
     document.getElementById("fForm").onsubmit = async e => {
@@ -100,7 +103,14 @@ async function factura(db, t) {
       if (msg) { err.textContent = msg; return; }
       const btn = e.target.querySelector("button[type=submit]"); btn.disabled = true; btn.textContent = "Enviando…";
       const data = { ...d, folio: t.folio, total: t.total, metodo: t.metodo || "", fechaVenta: t.fechaLocal, dia: t.dia || "", estado: "pendiente", origen: "cliente", creadoEn: serverTimestamp() };
-      try { await setDoc(ref, data); f = data; estado(); }
+      try {
+        await setDoc(ref, data); f = data;
+        if (formatoListo(formato) && formato.auto !== false && !(await enviarContador(formato, data))) {
+          const contador = new Date().toISOString();
+          try { await updateDoc(ref, { contador }); f = { ...data, contador }; } catch (e3) {}
+        }
+        estado();
+      }
       catch (e2) { err.textContent = "No se pudo enviar. Revisa tu conexión e intenta de nuevo."; btn.disabled = false; btn.textContent = "Enviar solicitud"; }
     };
   };

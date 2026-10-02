@@ -11,7 +11,8 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 import { ThermalPrinter, bluetoothSupport, escpos, rawbtUrl } from "./printer.js";
-import { formHTML, leerForm, validar, limpiarRFC, nombreRegimen, nombreUso, FORMA_PAGO } from "./fiscal.js";
+import { formHTML, leerForm, validar, limpiarRFC, nombreRegimen, nombreUso, FORMA_PAGO, formaDe, claveForma, interpretarSheet,
+  formatoListo, respuestasContador, linkContador, enviarContador, leerFormato, CAMPOS_CONTADOR } from "./fiscal.js";
 
 /* ================= utilidades ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -61,7 +62,7 @@ const S = {
   user: null, perfil: null,
   config: { ...DEFAULT_CONFIG }, productos: [], ticketsDia: [], usuarios: [],
   dia: hoyStr(), buscar: "",
-  cart: [], descuento: "", facturas: [], facFiltro: "pendiente", facBuscar: "",
+  cart: [], descuento: "", facturas: [], facFiltro: "pendiente", facBuscar: "", formato: null,
   online: navigator.onLine,
   prn: { ancho: 32, acentos: true, auto: true, corte: false, copias: 1, ...LS.get("printer", {}) },
 };
@@ -644,19 +645,48 @@ async function autocompletarRFC(root) {
     if (!s.exists()) return;
     const c = s.data();
     const set = (id, v) => { const el = $("#" + id, root); if (el && v && !el.value.trim()) el.value = v; };
-    set("fRazon", c.razonSocial); set("fCp", c.cp); set("fMail", c.email);
+    set("fRazon", c.razonSocial); set("fCp", c.cp); set("fMail", c.email); set("fCel", c.celular);
     if (c.regimen && !$("#fReg", root).value) $("#fReg", root).value = c.regimen;
     if (c.usoCfdi) $("#fUso", root).value = c.usoCfdi;
     toast("Datos de " + c.razonSocial + " cargados");
   } catch (e) {}
 }
+// Ficha del cliente para autollenar la próxima vez (solo se guardan los campos que traen dato).
+const fichaCliente = d => {
+  const o = { rfc: d.rfc };
+  ["razonSocial", "cp", "regimen", "usoCfdi", "email", "celular"].forEach(k => { if (d[k]) o[k] = d[k]; });
+  return o;
+};
 async function guardarClienteFiscal(d) {
-  const { rfc, razonSocial, cp, regimen, usoCfdi, email } = d;
-  try { await setDoc(doc(db, "clientesFiscales", rfc), { rfc, razonSocial, cp, regimen, usoCfdi, email, actualizado: serverTimestamp() }); } catch (e) {}
+  if (!d.rfc || d.rfc.length < 12 || /[\/.]/.test(d.rfc)) return;
+  try { await setDoc(doc(db, "clientesFiscales", d.rfc), { ...fichaCliente(d), actualizado: serverTimestamp() }, { merge: true }); } catch (e) {}
 }
+const txtRegimen = f => f.regimen ? `${f.regimen} ${nombreRegimen(f.regimen)}` : f.regimenTxt || "";
+const txtUso = f => f.usoCfdi ? `${f.usoCfdi} ${nombreUso(f.usoCfdi)}` : f.usoTxt || "";
+const txtForma = f => { const n = formaDe(f), c = claveForma(n); return c ? `${c} ${n}` : (FORMA_PAGO[n] || n); };
+// Fecha en que se pidió la factura (la que aparece en la primera columna de la hoja).
+function fechaSolicitud(f) {
+  const c = f.creadoEn;
+  const d = f.origen === "sheet" && f.fechaVenta ? new Date(f.fechaVenta)
+    : c && c.toDate ? c.toDate() : c && c.__ts ? new Date(c.__ts) : f.fechaVenta ? new Date(f.fechaVenta) : null;
+  return d && !isNaN(d) ? d : null;
+}
+const fechaHoja = d => d ? `${pad(d.getDate(), 2)}/${pad(d.getMonth() + 1, 2)}/${d.getFullYear()} ${pad(d.getHours(), 2)}:${pad(d.getMinutes(), 2)}:${pad(d.getSeconds(), 2)}` : "";
+/* Formato del contador: cada solicitud se envía al formulario de Google "Facturación Electrónica". */
+const contadorListo = () => formatoListo(S.formato);
+const contadorAuto = () => contadorListo() && S.formato.auto !== false;
+// Envía y deja anotado en la solicitud cuándo se mandó. Devuelve "" o el motivo por el que no salió.
+async function mandarAlContador(id, f) {
+  const msg = await enviarContador(S.formato, f);
+  if (msg) return msg;
+  try { await updateDoc(doc(db, "facturas", id), { contador: new Date().toISOString() }); } catch (e) { return "Se envió al contador, pero no se pudo anotar aquí."; }
+  return "";
+}
+const txtContador = f => !f.contador ? "Sin enviar" : f.contador === "hoja" ? "Enviada con el formulario anterior" : "Enviada · " + fechaLarga(f.contador);
 function datosTexto(f) {
-  return [`RFC: ${f.rfc}`, `Razón social: ${f.razonSocial}`, `C.P. fiscal: ${f.cp}`, `Régimen: ${f.regimen} ${nombreRegimen(f.regimen)}`,
-    `Uso CFDI: ${f.usoCfdi} ${nombreUso(f.usoCfdi)}`, `Correo: ${f.email}`, `Ticket: #${pad(f.folio)} · ${money(f.total)} · ${f.metodo ? FORMA_PAGO[f.metodo] || f.metodo : ""}`,
+  return [`RFC: ${f.rfc}`, `Razón social: ${f.razonSocial}`, `C.P. fiscal: ${f.cp}`, `Régimen: ${txtRegimen(f)}`,
+    `Uso CFDI: ${txtUso(f)}`, `Forma de pago: ${txtForma(f)}`, `Monto: ${money(f.total)}`, `Celular: ${f.celular || ""}`, `Correo: ${f.email}`,
+    f.folio ? `Ticket: #${pad(f.folio)}` : "Registro importado del Sheet",
     `Fecha de venta: ${f.fechaVenta ? fechaLarga(f.fechaVenta) : ""}`].join("\n");
 }
 async function openFactura(t) {
@@ -670,7 +700,7 @@ async function openFactura(t) {
     ${f ? `<div class="notice ${f.estado === "facturada" ? "ok" : ""}" style="margin-bottom:12px">${f.estado === "facturada" ? "Ya se facturó" + (f.folioFiscal ? ` · folio fiscal ${esc(f.folioFiscal)}` : "") : `Solicitud pendiente${f.origen === "cliente" ? " (la llenó el cliente)" : ""}`}</div>` : ""}
     <p class="note" style="margin:0 0 10px">Ticket por ${money(t.calc.total)} · ${esc(t.metodo)} · ${fechaLarga(t.fechaLocal)}</p>
     ${editable ? `<form id="facForm" class="stack card" autocomplete="off">
-      ${formHTML(f || {})}
+      ${formHTML(f || { celular: (t.contacto && t.contacto.tel) || "", email: (t.contacto && t.contacto.email) || "" }, t.metodo)}
       <p class="note" style="margin:0">Escribe el RFC: si el cliente ya facturó antes, sus datos se llenan solos.</p>
       <div class="err" id="fErr"></div>
       <button class="btn-primary" type="submit">${f ? "Guardar cambios" : "Registrar solicitud"}</button>
@@ -690,7 +720,12 @@ async function openFactura(t) {
       if (f) await updateDoc(doc(db, "facturas", tk), { ...d, actualizado: serverTimestamp() });
       else await setDoc(doc(db, "facturas", tk), { ...base, origen: "caja", capturo: S.perfil.nombre, creadoEn: serverTimestamp() });
       await guardarClienteFiscal(d);
-      toast(f ? "Solicitud actualizada" : "Solicitud de factura registrada"); closeSheet();
+      let aviso = f ? "Solicitud actualizada" : "Solicitud de factura registrada";
+      if (contadorAuto() && !(f && f.contador)) {
+        const m = await mandarAlContador(tk, { ...(f || {}), ...base });
+        aviso = m ? `${aviso}. ${m}` : `${aviso} y enviada al contador`;
+      } else if (f && f.contador) aviso += ". Ya se había enviado al contador: avísale del cambio";
+      toast(aviso); closeSheet();
     } catch (err) { $("#fErr").textContent = ERR(err); btn.disabled = false; }
   };
 }
@@ -699,12 +734,12 @@ function viewFacturas(v) {
   const q = S.facBuscar.trim().toUpperCase();
   let list = S.facturas;
   if (S.facFiltro !== "todas") list = list.filter(f => f.estado === S.facFiltro);
-  if (q) list = list.filter(f => f.rfc.includes(q) || (f.razonSocial || "").includes(q) || String(f.folio).includes(q.replace(/^0+/, "")));
+  if (q) list = list.filter(f => (f.rfc || "").includes(q) || (f.razonSocial || "").toUpperCase().includes(q) || (f.celular || "").includes(q) || (f.folio && String(f.folio).includes(q.replace(/^0+/, ""))));
   const pend = S.facturas.filter(f => f.estado === "pendiente").length;
   v.innerHTML = `
   <div class="seg" role="group" aria-label="Filtro">${[["pendiente", `Pendientes (${pend})`], ["facturada", "Facturadas"], ["todas", "Todas"]].map(([k, l]) => `<button type="button" data-ff="${k}" aria-pressed="${S.facFiltro === k}">${l}</button>`).join("")}</div>
   <div class="row nowrap" style="margin-top:10px">
-    <input id="facBuscar" type="search" class="grow" placeholder="Buscar RFC, razón social o folio" value="${esc(S.facBuscar)}" aria-label="Buscar">
+    <input id="facBuscar" type="search" class="grow" placeholder="Buscar RFC, nombre, celular o folio" value="${esc(S.facBuscar)}" aria-label="Buscar">
     <button id="facCsv" ${S.facturas.length ? "" : "disabled"}>Excel</button>
   </div>
   <h2>${list.length} solicitud${list.length === 1 ? "" : "es"}</h2>
@@ -713,30 +748,38 @@ function viewFacturas(v) {
       <div class="row between"><strong>${esc(f.razonSocial)}</strong><span class="tag ${f.estado === "facturada" ? "done" : ""}">${ESTADO_FAC[f.estado] || f.estado}</span></div>
       <div class="fac-grid">
         <span class="k">RFC</span><span class="mono">${esc(f.rfc)}</span>
-        <span class="k">Ticket</span><span>#${pad(f.folio)} · ${money(f.total)}${f.metodo ? " · " + esc(f.metodo) : ""}</span>
-        <span class="k">C.P. / Régimen</span><span>${esc(f.cp)} · ${esc(f.regimen)} ${esc(nombreRegimen(f.regimen))}</span>
-        <span class="k">Uso CFDI</span><span>${esc(f.usoCfdi)} ${esc(nombreUso(f.usoCfdi))}</span>
+        <span class="k">${f.folio ? "Ticket" : "Monto"}</span><span>${f.folio ? `#${pad(f.folio)} · ` : ""}${money(f.total)}${formaDe(f) ? " · " + esc(formaDe(f)) : ""}</span>
+        <span class="k">C.P. / Régimen</span><span>${esc(f.cp)} · ${esc(txtRegimen(f))}</span>
+        <span class="k">Uso CFDI</span><span>${esc(txtUso(f))}</span>
         <span class="k">Correo</span><span>${esc(f.email)}</span>
-        <span class="k">Solicitó</span><span>${f.origen === "cliente" ? "El cliente, desde su ticket" : "En caja" + (f.capturo ? " · " + esc(f.capturo) : "")}${f.fechaVenta ? " · venta del " + esc(new Date(f.fechaVenta).toLocaleDateString("es-MX")) : ""}</span>
+        ${f.celular ? `<span class="k">Celular</span><span>${esc(f.celular)}</span>` : ""}
+        <span class="k">Solicitó</span><span>${f.origen === "sheet" ? "Importada del Sheet" + (fechaSolicitud(f) ? " · " + esc(fechaSolicitud(f).toLocaleDateString("es-MX")) : "") : (f.origen === "cliente" ? "El cliente, desde su ticket" : "En caja" + (f.capturo ? " · " + esc(f.capturo) : "")) + (f.fechaVenta ? " · venta del " + esc(new Date(f.fechaVenta).toLocaleDateString("es-MX")) : "")}</span>
+        ${contadorListo() || f.contador ? `<span class="k">Contador</span><span>${esc(txtContador(f))}${contadorListo() ? ` · <a data-form style="color:inherit" href="${esc(linkContador(S.formato, f))}" target="_blank" rel="noopener">abrir formulario lleno</a>` : ""}</span>` : ""}
         ${f.folioFiscal ? `<span class="k">Folio fiscal</span><span class="mono">${esc(f.folioFiscal)}</span>` : ""}
       </div>
-      <div class="row" style="margin-top:10px">
+      <div style="margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
         <button data-copy class="grow">Copiar datos</button>
-        <button data-ver class="grow">Ver ticket</button>
+        ${f.folio ? `<button data-ver class="grow">Ver ticket</button>` : ""}
+        ${contadorListo() && !f.contador && f.estado === "pendiente" ? `<button data-cont class="grow">Enviar al contador</button>` : ""}
         ${f.estado === "pendiente" ? `<button data-done class="btn-primary grow">Marcar facturada</button>` : `<button data-undo class="btn-ghost grow">Regresar a pendiente</button>`}
       </div>
       <div data-box></div>
     </div>`).join("")}</div>` : `<div class="card empty">${S.facFiltro === "pendiente" ? "No hay solicitudes pendientes." : "No hay solicitudes."}</div>`}
-  <p class="note">Los clientes piden factura desde el link de su ticket, o el empleado la registra en la caja desde el ticket → <b>Factura</b>.</p>`;
+  <p class="note">Los clientes piden factura desde el link de su ticket, o el empleado la registra en la caja desde el ticket → <b>Factura</b>. El botón <b>Excel</b> descarga todo con las mismas columnas de tu hoja de facturación.</p>
+  <button id="facImp" class="btn-ghost" style="width:100%">Importar base de datos del Sheet</button>`;
   $$("[data-ff]", v).forEach(b => b.onclick = () => { S.facFiltro = b.dataset.ff; render(); });
   $("#facBuscar").oninput = e => { S.facBuscar = e.target.value; const p = e.target.selectionStart; render(); const n = $("#facBuscar"); n.focus(); try { n.setSelectionRange(p, p); } catch (_) {} };
   $("#facCsv").onclick = exportFacturas;
+  $("#facImp").onclick = openImportar;
   $$(".fac", v).forEach(card => {
     const f = S.facturas.find(x => x.id === card.dataset.fid); if (!f) return;
     $("[data-copy]", card).onclick = async () => { try { await navigator.clipboard.writeText(datosTexto(f)); toast("Datos copiados"); } catch (e) { toast("No se pudo copiar"); } };
-    $("[data-ver]", card).onclick = async () => {
+    const ver = $("[data-ver]", card);
+    if (ver) ver.onclick = async () => {
       try { const s = await getDoc(doc(db, "tickets", String(f.folio))); if (s.exists()) openTicket({ id: s.id, ...s.data() }, false); else toast("No se encontró el ticket"); } catch (e) { toast(ERR(e)); }
     };
+    const cont = $("[data-cont]", card);
+    if (cont) cont.onclick = async () => { cont.disabled = true; cont.textContent = "Enviando…"; const m = await mandarAlContador(f.id, f); toast(m || "Enviada al contador"); if (m) { cont.disabled = false; cont.textContent = "Enviar al contador"; } };
     const done = $("[data-done]", card);
     if (done) done.onclick = () => {
       $("[data-box]", card).innerHTML = `<div class="stack" style="margin-top:10px"><label class="f">Folio fiscal (UUID) <span class="hint">(opcional)</span><input data-uuid placeholder="Ej. 6F9A1C2B-…" autocomplete="off"></label><button data-ok class="btn-primary">Confirmar: ya se facturó</button></div>`;
@@ -751,13 +794,99 @@ function viewFacturas(v) {
     if (undo) undo.onclick = async () => { try { await updateDoc(doc(db, "facturas", f.id), { estado: "pendiente" }); toast("Regresó a pendientes"); } catch (e) { toast(ERR(e)); } };
   });
 }
+// Mismas columnas y orden que la pestaña "Respuestas" del Sheet de facturación (A–J); lo que agrega la caja va al final.
+const COLS_HOJA = ["Fecha", "RFC", "Nombre", "RegimenFiscal", "CP", "UsoCFDI", "FormaPago", "Monto", "Celular", "Correo", "Ticket", "Estado", "FolioFiscal", "Contador"];
+const filaHoja = f => [fechaHoja(fechaSolicitud(f)), f.rfc, f.razonSocial, nombreRegimen(f.regimen) || f.regimenTxt || "", f.cp, nombreUso(f.usoCfdi) || f.usoTxt || "",
+  formaDe(f), f.total, f.celular || "", f.email, f.folio ? pad(f.folio) : "", ESTADO_FAC[f.estado] || f.estado, f.folioFiscal || "", txtContador(f)];
 function exportFacturas() {
-  const rows = [["Estado", "Folio ticket", "Fecha venta", "Total", "Forma de pago", "RFC", "Razón social", "C.P.", "Régimen", "Uso CFDI", "Correo", "Solicitó", "Folio fiscal"]];
-  S.facturas.slice().sort((a, b) => a.folio - b.folio).forEach(f => rows.push([ESTADO_FAC[f.estado] || f.estado, pad(f.folio), f.fechaVenta ? fechaLarga(f.fechaVenta) : "", f.total, f.metodo ? FORMA_PAGO[f.metodo] || f.metodo : "", f.rfc, f.razonSocial, f.cp, `${f.regimen} ${nombreRegimen(f.regimen)}`, `${f.usoCfdi} ${nombreUso(f.usoCfdi)}`, f.email, f.origen === "cliente" ? "Cliente" : "Caja", f.folioFiscal || ""]));
+  const t = f => { const d = fechaSolicitud(f); return d ? d.getTime() : 0; };
+  const rows = [COLS_HOJA, ...S.facturas.slice().sort((a, b) => t(a) - t(b)).map(filaHoja)];
   const csv = "﻿" + rows.map(r => r.map(x => '"' + String(x ?? "").replace(/"/g, '""') + '"').join(",")).join("\r\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
   a.download = `facturas_${hoyStr()}.csv`; document.body.appendChild(a); a.click(); a.remove();
+}
+
+/* ---------- Importar la base de datos del Sheet ---------- */
+const hashId = s => { let a = 2166136261, b = 5381; for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); a = Math.imul(a ^ c, 16777619); b = (Math.imul(b, 33) ^ c) | 0; } return (a >>> 0).toString(36) + (b >>> 0).toString(36); };
+function openImportar() {
+  let filas = [], estado = "facturada";
+  openSheet(`
+    <div class="row between" style="margin-bottom:12px"><strong class="sheet-title">Importar del Sheet</strong><button class="btn-ghost" data-close>Volver</button></div>
+    <div class="stack">
+      <p class="note" style="margin:0">Trae a la caja lo que ya tienes en tu hoja de facturación: el historial queda en esta pestaña y los clientes se autollenan al escribir su RFC.</p>
+      <ol class="note" style="margin:0;padding-left:20px">
+        <li>Abre tu Google Sheet, pestaña <b>Respuestas</b>.</li>
+        <li>Selecciona todas las filas, con encabezados, y cópialas.</li>
+        <li>Pégalas aquí abajo. También puedes subir el archivo .csv de la hoja.</li>
+      </ol>
+      <label class="f">Filas de la hoja<textarea id="impTxt" rows="5" spellcheck="false" autocomplete="off" placeholder="Pega aquí las filas copiadas"></textarea></label>
+      <label class="f">O sube el archivo<input id="impFile" type="file" accept=".csv,.tsv,.txt,text/csv,text/plain"></label>
+      <div id="impPrev"></div>
+    </div>`);
+  const prev = $("#impPrev");
+  const pinta = () => {
+    const r = interpretarSheet($("#impTxt").value); filas = r.filas;
+    if (!$("#impTxt").value.trim()) { prev.innerHTML = ""; return; }
+    if (!filas.length) { prev.innerHTML = `<div class="notice">${esc(r.error || "No encontré filas con RFC. Copia también la fila de encabezados.")}</div>`; return; }
+    const clientes = new Set(filas.filter(f => f.rfcOk).map(f => f.rfc)).size;
+    const conAviso = filas.filter(f => f.avisos.length);
+    prev.innerHTML = `<div class="stack">
+      <div class="notice ok">${filas.length} fila${filas.length === 1 ? "" : "s"} · ${clientes} cliente${clientes === 1 ? "" : "s"} distinto${clientes === 1 ? "" : "s"} · ${money(filas.reduce((a, f) => a + f.total, 0))}</div>
+      <div class="tlist">${filas.slice(0, 3).map(f => `<div class="card fac"><strong>${esc(f.razonSocial)}</strong><div class="fac-grid">
+        <span class="k">RFC</span><span class="mono">${esc(f.rfc)}</span>
+        <span class="k">Fecha</span><span>${esc(fechaHoja(f.fecha) || f.fechaTxt)}</span>
+        <span class="k">Régimen</span><span>${esc(f.regimen ? f.regimen + " " + nombreRegimen(f.regimen) : f.regimenTxt)}</span>
+        <span class="k">Uso CFDI</span><span>${esc(f.usoCfdi ? f.usoCfdi + " " + nombreUso(f.usoCfdi) : f.usoTxt)}</span>
+        <span class="k">Pago</span><span>${money(f.total)} · ${esc(f.formaPago)}</span>
+        <span class="k">Contacto</span><span>${esc(f.celular)} · ${esc(f.email)}</span></div></div>`).join("")}</div>
+      ${filas.length > 3 ? `<p class="note" style="margin:0">Se muestran las primeras 3 para que revises que cada dato cayó en su lugar.</p>` : ""}
+      ${conAviso.length ? `<div class="notice">Revisa ${conAviso.length === 1 ? "esta fila" : "estas filas"} (se importa${conAviso.length === 1 ? "" : "n"} igual, tal como está${conAviso.length === 1 ? "" : "n"} en la hoja):<br>${conAviso.slice(0, 8).map(f => `Fila ${f.n}: ${esc(f.avisos.join(", "))}`).join("<br>")}${conAviso.length > 8 ? `<br>…y ${conAviso.length - 8} más` : ""}</div>` : ""}
+      <div><div class="note" style="margin:0 0 6px">Estas facturas de la hoja…</div>
+        <div class="seg" style="grid-template-columns:1fr 1fr" role="group" aria-label="Estado de las importadas">
+          <button type="button" data-ie="facturada" aria-pressed="${estado === "facturada"}">Ya se facturaron</button>
+          <button type="button" data-ie="pendiente" aria-pressed="${estado === "pendiente"}">Siguen pendientes</button></div></div>
+      <div class="err" id="impErr"></div>
+      <button class="btn-primary" id="impOk">Importar ${filas.length} fila${filas.length === 1 ? "" : "s"}</button></div>`;
+    $$("[data-ie]", prev).forEach(b => b.onclick = () => { estado = b.dataset.ie; $$("[data-ie]", prev).forEach(x => x.setAttribute("aria-pressed", x === b)); });
+    $("#impOk").onclick = () => importar(filas, estado);
+  };
+  $("#impTxt").oninput = pinta;
+  $("#impFile").onchange = async e => { const file = e.target.files[0]; if (!file) return; $("#impTxt").value = await file.text(); pinta(); };
+}
+async function importar(filas, estado) {
+  const btn = $("#impOk"), err = $("#impErr"); btn.disabled = true; btn.textContent = "Importando…"; err.textContent = "";
+  // Un cliente por RFC: se queda con los datos de su fila más reciente.
+  const clientes = new Map();
+  filas.filter(f => f.rfcOk).slice().sort((a, b) => (a.fecha ? a.fecha.getTime() : 0) - (b.fecha ? b.fecha.getTime() : 0)).forEach(f => clientes.set(f.rfc, { ...(clientes.get(f.rfc) || {}), ...fichaCliente(f) }));
+  const ops = [];
+  filas.forEach(f => {
+    const fecha = f.fecha || new Date();
+    // El id sale de la propia fila: volver a importar la misma hoja no duplica nada.
+    const id = "sheet" + hashId([f.fechaTxt, f.rfc, f.total, f.razonSocial].join("|"));
+    const d = { rfc: f.rfc, razonSocial: f.razonSocial, cp: f.cp, email: f.email, regimen: f.regimen, usoCfdi: f.usoCfdi, celular: f.celular, formaPago: f.formaPago,
+      total: f.total, fechaVenta: fecha.toISOString(), dia: hoyStr(fecha), estado, origen: "sheet", creadoEn: fecha, capturo: S.perfil.nombre, contador: "hoja" };
+    if (!f.regimen && f.regimenTxt) d.regimenTxt = f.regimenTxt;
+    if (!f.usoCfdi && f.usoTxt) d.usoTxt = f.usoTxt;
+    ops.push([doc(db, "facturas", id), d, id]);
+  });
+  try {
+    // Las que ya estaban importadas no se tocan (para no regresar a "pendiente" algo que ya marcaste).
+    const ya = new Set(S.facturas.map(f => f.id));
+    const nuevas = ops.filter(o => !ya.has(o[2]));
+    const todo = [...nuevas.map(([r, d]) => [r, d, false]), ...[...clientes].map(([rfc, c]) => [doc(db, "clientesFiscales", rfc), { ...c, actualizado: serverTimestamp() }, true])];
+    for (let i = 0; i < todo.length; i += 400) {
+      const batch = writeBatch(db);
+      todo.slice(i, i + 400).forEach(([r, d, merge]) => merge ? batch.set(r, d, { merge: true }) : batch.set(r, d));
+      await batch.commit();
+    }
+    S.facFiltro = estado === "pendiente" ? "pendiente" : "todas";
+    closeSheet(); render();
+    toast(`${nuevas.length} factura${nuevas.length === 1 ? "" : "s"} importada${nuevas.length === 1 ? "" : "s"}${ops.length - nuevas.length ? ` (${ops.length - nuevas.length} ya estaban)` : ""} · ${clientes.size} cliente${clientes.size === 1 ? "" : "s"}`);
+  } catch (e) {
+    err.textContent = String(e && e.code || "").includes("permission-denied") ? "Firebase no lo permitió: falta publicar las reglas nuevas (Firestore → Reglas)." : ERR(e);
+    btn.disabled = false; btn.textContent = `Importar ${filas.length} fila${filas.length === 1 ? "" : "s"}`;
+  }
 }
 
 /* ---------- Tickets del día ---------- */
@@ -958,6 +1087,19 @@ function viewAjustes(v) {
       <option value="no" ${c.iva === "no" ? "selected" : ""}>No mostrar IVA</option></select></label>
     <button class="btn-primary" type="submit">Guardar datos</button>
   </form>` : ""}
+  ${isAdmin() ? `
+  <h2>Formato del contador</h2>
+  <div class="card stack">
+    <div class="notice ${contadorListo() ? "ok" : ""}">${contadorListo() ? "Conectado: las solicitudes de factura se mandan al formulario «Facturación Electrónica» de tus contadores." : "Sin conectar: las solicitudes se guardan en la caja, pero todavía no llegan al formulario de tus contadores."}</div>
+    <label class="f">${contadorListo() ? "Cambiar la conexión" : "Conectar"} <span class="hint">(pega el link prellenado del formulario, o el código de tu script anterior)</span><textarea id="fcTxt" rows="3" spellcheck="false" autocomplete="off" placeholder="https://docs.google.com/forms/d/e/…/viewform?usp=pp_url&entry.123=…"></textarea></label>
+    <div id="fcPrev"></div>
+    <label class="chk"><input type="checkbox" id="fcAuto" ${!S.formato || S.formato.auto !== false ? "checked" : ""}>Enviar al contador en cuanto se pide la factura</label>
+    <div class="row">
+      <button class="btn-primary grow" id="fcSave" disabled>Guardar conexión</button>
+      ${contadorListo() ? `<a class="btn grow" id="fcTest" target="_blank" rel="noopener" href="${esc(linkContador(S.formato, PRUEBA_CONTADOR()))}">Probar</a>` : ""}
+    </div>
+    ${contadorListo() ? `<p class="note" style="margin:0"><b>Probar</b> abre el formulario con datos de ejemplo: revisa que los 9 datos estén cada uno en su pregunta y ciérralo sin enviar.</p>` : ""}
+  </div>` : ""}
   <h2>Cuenta</h2>
   <div class="card row"><div class="grow"><b>${esc(S.perfil.nombre)}</b><div class="note">${esc(S.user.email)} · ${isAdmin() ? "Administrador" : "Cajero"}</div></div><button id="aOut">Salir</button></div>`;
   const savePrn = () => LS.set("printer", S.prn);
@@ -979,8 +1121,31 @@ function viewAjustes(v) {
     const cfg = { nombre: $("#cNombre").value.trim() || "Mi Negocio", direccion: $("#cDir").value.trim(), telefono: $("#cTel").value.trim(), rfc: $("#cRfc").value.trim().toUpperCase(), pie: $("#cPie").value.trim(), iva: $("#cIva").value, cupon: $("#cCupon").value.trim().toUpperCase().replace(/\s+/g, "") };
     try { await setDoc(doc(db, "config", "negocio"), cfg); toast("Datos guardados"); } catch (err) { toast(ERR(err)); }
   };
+  const fcTxt = $("#fcTxt");
+  if (fcTxt) {
+    let leido = null;
+    fcTxt.oninput = () => {
+      const prev = $("#fcPrev"); leido = fcTxt.value.trim() ? leerFormato(fcTxt.value) : null; $("#fcSave").disabled = !(leido && leido.ok);
+      prev.innerHTML = !leido ? "" : leido.ok
+        ? `<div class="notice ok">Encontré las 9 preguntas (${esc(leido.origen)}).</div>${leido.avisos.length ? `<div class="notice" style="margin-top:8px">${esc(leido.avisos.join(" "))}</div>` : ""}
+           <div class="fac"><div class="fac-grid">${CAMPOS_CONTADOR.map(([k, n]) => `<span class="k">${n}</span><span class="mono">entry.${esc(leido.ids[k])}</span>`).join("")}</div></div>`
+        : `<div class="notice">${esc(leido.avisos.join(" "))}</div>`;
+    };
+    $("#fcSave").onclick = async () => {
+      if (!leido || !leido.ok) return;
+      const d = { formUrl: leido.formUrl, ids: leido.ids, auto: $("#fcAuto").checked, actualizado: new Date().toISOString() };
+      if (leido.opciones) d.opciones = leido.opciones;
+      try { await setDoc(doc(db, "publico", "formato"), d); S.formato = d; toast("Formato del contador conectado"); fcTxt.blur(); render(); }
+      catch (e) { toast(String(e && e.code || "").includes("permission-denied") ? "Falta publicar las reglas nuevas en Firebase" : ERR(e)); }
+    };
+    $("#fcAuto").onchange = async e => {
+      if (!contadorListo()) return;
+      try { await updateDoc(doc(db, "publico", "formato"), { auto: e.target.checked }); toast(e.target.checked ? "Envío automático activado" : "Envío automático desactivado"); } catch (err) { toast(ERR(err)); }
+    };
+  }
   $("#aOut").onclick = () => signOut(auth);
 }
+const PRUEBA_CONTADOR = () => ({ rfc: "XAXX010101000", razonSocial: "PRUEBA NO FACTURAR", regimen: "626", cp: "64000", usoCfdi: "G03", formaPago: "Efectivo", total: 1, celular: "1111111111", email: (S.user && S.user.email) || "prueba@correo.com" });
 
 function openPrinterSheet() {
   const bt = bluetoothSupport();
@@ -1031,6 +1196,7 @@ async function startSession(user) {
     softRender();
   }, () => { S.screen = "noaccess"; stopListeners(); render(); }));
   unsubs.push(onSnapshot(doc(db, "config", "negocio"), s => { S.config = { ...DEFAULT_CONFIG, ...(s.data() || {}) }; softRender(); }, () => {}));
+  unsubs.push(onSnapshot(doc(db, "publico", "formato"), s => { S.formato = s.data() || null; softRender(); }, () => {}));
   unsubs.push(onSnapshot(collection(db, "productos"), s => { S.productos = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
   if (isAdmin()) unsubs.push(onSnapshot(query(collection(db, "facturas"), orderBy("creadoEn", "desc"), limit(500)), s => { S.facturas = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
   if (isAdmin()) unsubs.push(onSnapshot(collection(db, "usuarios"), s => { S.usuarios = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
