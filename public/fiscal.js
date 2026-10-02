@@ -70,6 +70,12 @@ export const CONTADOR = {
   forma: { "Efectivo": "Efectivo", "Tarjeta de Débito": "Tarjeta de Débito", "Tarjeta de Crédito": "Tarjeta de Crédito", "Transferencia": "Transferencia Eléctronica" },
 };
 export const FORM_CONTADOR = "https://docs.google.com/forms/d/e/1FAIpQLSed7-S3SPx92uTFhZwSfkY8HeQ00baDoxrREZI2-Gc0vfA-Dg";
+// Identificador de cada pregunta dentro de ese formulario (los mismos que usaba el script anterior de facturación).
+export const FORMATO_DEFAULT = {
+  formUrl: FORM_CONTADOR, auto: true,
+  ids: { rfc: "443831071", nombre: "980432431", regimen: "2003251000", cp: "1511965354", uso: "1558851713",
+         forma: "1169356144", monto: "1475725609", celular: "1615881201", correo: "1493451220" },
+};
 // Las 9 preguntas del formulario, en su orden.
 export const CAMPOS_CONTADOR = [
   ["rfc", "RFC"], ["nombre", "Nombre o razón social"], ["regimen", "Régimen fiscal"], ["cp", "Código postal"], ["uso", "Uso de CFDI"],
@@ -296,7 +302,8 @@ export async function enviarContador(c, f) {
   if (!formatoListo(c)) return "Falta configurar el formato del contador.";
   const { v, faltan } = respuestasContador(c, f);
   if (faltan.length) return "Falta: " + faltan.join(", ") + ".";
-  try { await fetch(baseForm(c) + "/formResponse", { method: "POST", mode: "no-cors", body: parametros(c, v) }); return ""; }
+  const p = parametros(c, v); p.set("fvv", "1"); p.set("pageHistory", "0");
+  try { await fetch(baseForm(c) + "/formResponse", { method: "POST", mode: "no-cors", body: p }); return ""; }
   catch (e) { return "Sin conexión: no se pudo enviar al contador."; }
 }
 

@@ -1,5 +1,5 @@
 // Guarda la app en el celular para que abra rápido. Siempre intenta la versión más nueva primero.
-const CACHE = "caja-v9";
+const CACHE = "caja-v10";
 const SHELL = ["./", "index.html", "app.js", "printer.js", "firebase-config.js", "manifest.webmanifest", "icon.svg", "logo.png", "ticket.html", "fiscal.js"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });

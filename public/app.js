@@ -12,7 +12,7 @@ import {
 import { firebaseConfig } from "./firebase-config.js";
 import { ThermalPrinter, bluetoothSupport, escpos, rawbtUrl } from "./printer.js";
 import { formHTML, leerForm, validar, limpiarRFC, nombreRegimen, nombreUso, FORMA_PAGO, formaDe, claveForma, interpretarSheet,
-  formatoListo, respuestasContador, linkContador, enviarContador, leerFormato, CAMPOS_CONTADOR } from "./fiscal.js";
+  formatoListo, respuestasContador, linkContador, enviarContador, leerFormato, CAMPOS_CONTADOR, FORMATO_DEFAULT } from "./fiscal.js";
 
 /* ================= utilidades ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -62,7 +62,7 @@ const S = {
   user: null, perfil: null,
   config: { ...DEFAULT_CONFIG }, productos: [], ticketsDia: [], usuarios: [],
   dia: hoyStr(), buscar: "",
-  cart: [], descuento: "", facturas: [], facFiltro: "pendiente", facBuscar: "", formato: null,
+  cart: [], descuento: "", facturas: [], facFiltro: "pendiente", facBuscar: "", formato: FORMATO_DEFAULT,
   online: navigator.onLine,
   prn: { ancho: 32, acentos: true, auto: true, corte: false, copias: 1, ...LS.get("printer", {}) },
 };
@@ -1091,7 +1091,7 @@ function viewAjustes(v) {
   <h2>Formato del contador</h2>
   <div class="card stack">
     <div class="notice ${contadorListo() ? "ok" : ""}">${contadorListo() ? "Conectado: las solicitudes de factura se mandan al formulario «Facturación Electrónica» de tus contadores." : "Sin conectar: las solicitudes se guardan en la caja, pero todavía no llegan al formulario de tus contadores."}</div>
-    <label class="f">${contadorListo() ? "Cambiar la conexión" : "Conectar"} <span class="hint">(pega el link prellenado del formulario, o el código de tu script anterior)</span><textarea id="fcTxt" rows="3" spellcheck="false" autocomplete="off" placeholder="https://docs.google.com/forms/d/e/…/viewform?usp=pp_url&entry.123=…"></textarea></label>
+    <label class="f">${contadorListo() ? "Cambiar la conexión" : "Conectar"} <span class="hint">(solo si tus contadores cambian de formulario: pega su link prellenado o el código fuente de la página)</span><textarea id="fcTxt" rows="3" spellcheck="false" autocomplete="off" placeholder="https://docs.google.com/forms/d/e/…/viewform?usp=pp_url&entry.123=…"></textarea></label>
     <div id="fcPrev"></div>
     <label class="chk"><input type="checkbox" id="fcAuto" ${!S.formato || S.formato.auto !== false ? "checked" : ""}>Enviar al contador en cuanto se pide la factura</label>
     <div class="row">
@@ -1140,7 +1140,9 @@ function viewAjustes(v) {
     };
     $("#fcAuto").onchange = async e => {
       if (!contadorListo()) return;
-      try { await updateDoc(doc(db, "publico", "formato"), { auto: e.target.checked }); toast(e.target.checked ? "Envío automático activado" : "Envío automático desactivado"); } catch (err) { toast(ERR(err)); }
+      const d = { formUrl: S.formato.formUrl || FORMATO_DEFAULT.formUrl, ids: S.formato.ids, auto: e.target.checked, actualizado: new Date().toISOString() };
+      if (S.formato.opciones) d.opciones = S.formato.opciones;
+      try { await setDoc(doc(db, "publico", "formato"), d); S.formato = d; toast(e.target.checked ? "Envío automático activado" : "Envío automático desactivado"); } catch (err) { toast(ERR(err)); }
     };
   }
   $("#aOut").onclick = () => signOut(auth);
@@ -1196,7 +1198,7 @@ async function startSession(user) {
     softRender();
   }, () => { S.screen = "noaccess"; stopListeners(); render(); }));
   unsubs.push(onSnapshot(doc(db, "config", "negocio"), s => { S.config = { ...DEFAULT_CONFIG, ...(s.data() || {}) }; softRender(); }, () => {}));
-  unsubs.push(onSnapshot(doc(db, "publico", "formato"), s => { S.formato = s.data() || null; softRender(); }, () => {}));
+  unsubs.push(onSnapshot(doc(db, "publico", "formato"), s => { S.formato = s.data() || FORMATO_DEFAULT; softRender(); }, () => {}));
   unsubs.push(onSnapshot(collection(db, "productos"), s => { S.productos = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
   if (isAdmin()) unsubs.push(onSnapshot(query(collection(db, "facturas"), orderBy("creadoEn", "desc"), limit(500)), s => { S.facturas = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
   if (isAdmin()) unsubs.push(onSnapshot(collection(db, "usuarios"), s => { S.usuarios = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
