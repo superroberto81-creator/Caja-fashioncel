@@ -238,13 +238,13 @@ const ICONS = {
   ajustes: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
 };
 const TAB_NAMES = { vender: "Vender", tickets: "Tickets", productos: "Productos", equipo: "Equipo", facturas: "Facturas", ajustes: "Ajustes" };
-const tabsFor = () => isAdmin() ? ["vender", "tickets", "facturas", "productos", "equipo", "ajustes"] : ["vender", "tickets", "ajustes"];
+const tabsFor = () => isAdmin() ? ["vender", "tickets", "facturas", "productos", "equipo", "ajustes"] : ["vender", "tickets", "facturas", "ajustes"];
 
 function renderTabs() {
   const nav = $("#tabs");
   if (S.screen !== "main") { nav.hidden = true; return; }
   nav.hidden = false;
-  nav.innerHTML = tabsFor().map(t => `<button data-tab="${t}" aria-current="${S.tab === t ? "page" : "false"}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[t]}</svg>${TAB_NAMES[t]}${t === "facturas" && S.facturas.some(f => f.estado === "pendiente") ? `<span class="tab-badge">${S.facturas.filter(f => f.estado === "pendiente").length}</span>` : ""}</button>`).join("");
+  nav.innerHTML = tabsFor().map(t => `<button data-tab="${t}" aria-current="${S.tab === t ? "page" : "false"}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[t]}</svg>${TAB_NAMES[t]}${t === "facturas" && isAdmin() && S.facturas.some(f => f.estado === "pendiente") ? `<span class="tab-badge">${S.facturas.filter(f => f.estado === "pendiente").length}</span>` : ""}</button>`).join("");
   $$("button", nav).forEach(b => b.onclick = () => { S.tab = b.dataset.tab; render(); scrollTo(0, 0); });
 }
 
@@ -683,6 +683,13 @@ async function mandarAlContador(id, f) {
   return "";
 }
 const txtContador = f => !f.contador ? "Sin enviar" : f.contador === "hoja" ? "Enviada con el formulario anterior" : "Enviada · " + fechaLarga(f.contador);
+// Estatus en palabras, para contestarle al cliente que pregunta por su factura.
+function estatusFactura(f) {
+  if (f.estado === "facturada") return `Ya se facturó${f.facturadaEn ? " el " + new Date(f.facturadaEn).toLocaleDateString("es-MX") : ""}. Se envía al correo ${f.email || "registrado"}; que revise también su carpeta de spam.`;
+  if (f.contador === "hoja") return "En proceso: ya está con los contadores.";
+  if (f.contador) return `En proceso: se envió a los contadores el ${new Date(f.contador).toLocaleDateString("es-MX")}.`;
+  return "Recibida: todavía no se envía a los contadores.";
+}
 function datosTexto(f) {
   return [`RFC: ${f.rfc}`, `Razón social: ${f.razonSocial}`, `C.P. fiscal: ${f.cp}`, `Régimen: ${txtRegimen(f)}`,
     `Uso CFDI: ${txtUso(f)}`, `Forma de pago: ${txtForma(f)}`, `Monto: ${money(f.total)}`, `Celular: ${f.celular || ""}`, `Correo: ${f.email}`,
@@ -731,21 +738,24 @@ async function openFactura(t) {
 }
 
 function viewFacturas(v) {
-  const q = S.facBuscar.trim().toUpperCase();
+  // La búsqueda ignora mayúsculas y acentos ("maria" encuentra "MARÍA").
+  const sinAcentos = x => String(x || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+  const q = sinAcentos(S.facBuscar.trim());
   let list = S.facturas;
   if (S.facFiltro !== "todas") list = list.filter(f => f.estado === S.facFiltro);
-  if (q) list = list.filter(f => (f.rfc || "").includes(q) || (f.razonSocial || "").toUpperCase().includes(q) || (f.celular || "").includes(q) || (f.folio && String(f.folio).includes(q.replace(/^0+/, ""))));
+  if (q) list = list.filter(f => (f.rfc || "").includes(q) || sinAcentos(f.razonSocial).includes(q) || (f.celular || "").includes(q) || (f.folio && String(f.folio).includes(q.replace(/^0+/, ""))));
   const pend = S.facturas.filter(f => f.estado === "pendiente").length;
   v.innerHTML = `
   <div class="seg" role="group" aria-label="Filtro">${[["pendiente", `Pendientes (${pend})`], ["facturada", "Facturadas"], ["todas", "Todas"]].map(([k, l]) => `<button type="button" data-ff="${k}" aria-pressed="${S.facFiltro === k}">${l}</button>`).join("")}</div>
   <div class="row nowrap" style="margin-top:10px">
     <input id="facBuscar" type="search" class="grow" placeholder="Buscar RFC, nombre, celular o folio" value="${esc(S.facBuscar)}" aria-label="Buscar">
-    <button id="facCsv" ${S.facturas.length ? "" : "disabled"}>Excel</button>
+    ${isAdmin() ? `<button id="facCsv" ${S.facturas.length ? "" : "disabled"}>Excel</button>` : ""}
   </div>
   <h2>${list.length} solicitud${list.length === 1 ? "" : "es"}</h2>
   ${list.length ? `<div class="tlist">${list.map(f => `
     <div class="card fac" data-fid="${esc(f.id)}">
       <div class="row between"><strong>${esc(f.razonSocial)}</strong><span class="tag ${f.estado === "facturada" ? "done" : ""}">${ESTADO_FAC[f.estado] || f.estado}</span></div>
+      <div class="notice ${f.estado === "facturada" ? "ok" : ""}" style="margin-top:8px">${esc(estatusFactura(f))}</div>
       <div class="fac-grid">
         <span class="k">RFC</span><span class="mono">${esc(f.rfc)}</span>
         <span class="k">${f.folio ? "Ticket" : "Monto"}</span><span>${f.folio ? `#${pad(f.folio)} · ` : ""}${money(f.total)}${formaDe(f) ? " · " + esc(formaDe(f)) : ""}</span>
@@ -754,26 +764,27 @@ function viewFacturas(v) {
         <span class="k">Correo</span><span>${esc(f.email)}</span>
         ${f.celular ? `<span class="k">Celular</span><span>${esc(f.celular)}</span>` : ""}
         <span class="k">Solicitó</span><span>${f.origen === "sheet" ? "Importada del Sheet" + (fechaSolicitud(f) ? " · " + esc(fechaSolicitud(f).toLocaleDateString("es-MX")) : "") : (f.origen === "cliente" ? "El cliente, desde su ticket" : "En caja" + (f.capturo ? " · " + esc(f.capturo) : "")) + (f.fechaVenta ? " · venta del " + esc(new Date(f.fechaVenta).toLocaleDateString("es-MX")) : "")}</span>
-        ${contadorListo() || f.contador ? `<span class="k">Contador</span><span>${esc(txtContador(f))}${contadorListo() ? ` · <a data-form style="color:inherit" href="${esc(linkContador(S.formato, f))}" target="_blank" rel="noopener">abrir formulario lleno</a>` : ""}</span>` : ""}
+        ${contadorListo() || f.contador ? `<span class="k">Contador</span><span>${esc(txtContador(f))}${contadorListo() && isAdmin() ? ` · <a data-form style="color:inherit" href="${esc(linkContador(S.formato, f))}" target="_blank" rel="noopener">abrir formulario lleno</a>` : ""}</span>` : ""}
         ${f.folioFiscal ? `<span class="k">Folio fiscal</span><span class="mono">${esc(f.folioFiscal)}</span>` : ""}
       </div>
       <div style="margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
-        <button data-copy class="grow">Copiar datos</button>
+        ${isAdmin() ? `<button data-copy class="grow">Copiar datos</button>` : ""}
         ${f.folio ? `<button data-ver class="grow">Ver ticket</button>` : ""}
-        ${contadorListo() && !f.contador && f.estado === "pendiente" ? `<button data-cont class="grow">Enviar al contador</button>` : ""}
-        ${f.estado === "pendiente" ? `<button data-done class="btn-primary grow">Marcar facturada</button>` : `<button data-undo class="btn-ghost grow">Regresar a pendiente</button>`}
+        ${isAdmin() && contadorListo() && !f.contador && f.estado === "pendiente" ? `<button data-cont class="grow">Enviar al contador</button>` : ""}
+        ${!isAdmin() ? "" : f.estado === "pendiente" ? `<button data-done class="btn-primary grow">Marcar facturada</button>` : `<button data-undo class="btn-ghost grow">Regresar a pendiente</button>`}
       </div>
       <div data-box></div>
     </div>`).join("")}</div>` : `<div class="card empty">${S.facFiltro === "pendiente" ? "No hay solicitudes pendientes." : "No hay solicitudes."}</div>`}
-  <p class="note">Los clientes piden factura desde el link de su ticket, o el empleado la registra en la caja desde el ticket → <b>Factura</b>. El botón <b>Excel</b> descarga todo con las mismas columnas de tu hoja de facturación.</p>
-  <button id="facImp" class="btn-ghost" style="width:100%">Importar base de datos del Sheet</button>`;
+  ${isAdmin() ? `<p class="note">Los clientes piden factura desde el link de su ticket, o el empleado la registra en la caja desde el ticket → <b>Factura</b>. El botón <b>Excel</b> descarga todo con las mismas columnas de tu hoja de facturación.</p>
+  <button id="facImp" class="btn-ghost" style="width:100%">Importar base de datos del Sheet</button>`
+  : `<p class="note">Busca por nombre, RFC, celular o número de ticket para decirle al cliente cómo va su factura. Para registrar una nueva, abre el ticket → <b>Factura</b>.</p>`}`;
   $$("[data-ff]", v).forEach(b => b.onclick = () => { S.facFiltro = b.dataset.ff; render(); });
   $("#facBuscar").oninput = e => { S.facBuscar = e.target.value; const p = e.target.selectionStart; render(); const n = $("#facBuscar"); n.focus(); try { n.setSelectionRange(p, p); } catch (_) {} };
-  $("#facCsv").onclick = exportFacturas;
-  $("#facImp").onclick = openImportar;
+  if (isAdmin()) { $("#facCsv").onclick = exportFacturas; $("#facImp").onclick = openImportar; }
   $$(".fac", v).forEach(card => {
     const f = S.facturas.find(x => x.id === card.dataset.fid); if (!f) return;
-    $("[data-copy]", card).onclick = async () => { try { await navigator.clipboard.writeText(datosTexto(f)); toast("Datos copiados"); } catch (e) { toast("No se pudo copiar"); } };
+    const copy = $("[data-copy]", card);
+    if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(datosTexto(f)); toast("Datos copiados"); } catch (e) { toast("No se pudo copiar"); } };
     const ver = $("[data-ver]", card);
     if (ver) ver.onclick = async () => {
       try { const s = await getDoc(doc(db, "tickets", String(f.folio))); if (s.exists()) openTicket({ id: s.id, ...s.data() }, false); else toast("No se encontró el ticket"); } catch (e) { toast(ERR(e)); }
@@ -1189,6 +1200,7 @@ async function startSession(user) {
   if (!snap || !snap.exists() || !snap.data().activo) { S.screen = "noaccess"; render(); return; }
   S.perfil = snap.data();
   S.screen = "main"; S.tab = "vender"; S.dia = hoyStr();
+  S.facFiltro = isAdmin() ? "pendiente" : "todas"; S.facBuscar = "";
   render();
   unsubs.push(onSnapshot(doc(db, "usuarios", user.uid), s => {
     const p = s.data();
@@ -1200,7 +1212,7 @@ async function startSession(user) {
   unsubs.push(onSnapshot(doc(db, "config", "negocio"), s => { S.config = { ...DEFAULT_CONFIG, ...(s.data() || {}) }; softRender(); }, () => {}));
   unsubs.push(onSnapshot(doc(db, "publico", "formato"), s => { S.formato = s.data() || FORMATO_DEFAULT; softRender(); }, () => {}));
   unsubs.push(onSnapshot(collection(db, "productos"), s => { S.productos = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
-  if (isAdmin()) unsubs.push(onSnapshot(query(collection(db, "facturas"), orderBy("creadoEn", "desc"), limit(500)), s => { S.facturas = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
+  unsubs.push(onSnapshot(query(collection(db, "facturas"), orderBy("creadoEn", "desc"), limit(500)), s => { S.facturas = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
   if (isAdmin()) unsubs.push(onSnapshot(collection(db, "usuarios"), s => { S.usuarios = s.docs.map(d => ({ id: d.id, ...d.data() })); softRender(); }, () => {}));
   listenDia();
   unsubs.push(() => { if (diaUnsub) { diaUnsub(); diaUnsub = null; } });
