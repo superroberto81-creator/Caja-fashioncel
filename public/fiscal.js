@@ -85,9 +85,19 @@ export const CAMPOS_CONTADOR = [
 const RFC_RE = /^([A-ZÑ&]{3,4})(\d{6})([A-Z0-9]{3})$/;
 export const limpiarRFC = s => String(s || "").toUpperCase().replace(/[\s-]/g, "");
 
+// Dice qué le pasa a un RFC que no cumple el formato, para que quien lo escribe sepa qué corregir.
+function mensajeRFC(r) {
+  const n = (r || "").length;
+  if (!n) return "Escribe el RFC.";
+  if (n < 12) return `Al RFC le faltan caracteres: tiene ${n} y deben ser 12 (empresa) o 13 (persona).`;
+  if (n > 13) return `Al RFC le sobran caracteres: tiene ${n} y deben ser 12 (empresa) o 13 (persona).`;
+  if (n === 12 && /^[A-ZÑ&]{4}/.test(r)) return "Al RFC le falta un carácter: empieza con 4 letras, así que es de persona y debe tener 13. Este tiene 12.";
+  return "Revisa el RFC: lleva 3 o 4 letras, 6 números de la fecha y 3 caracteres finales. Cuida no escribir la letra O en lugar del cero.";
+}
+
 // Devuelve un mensaje de error o "" si todo está bien.
 export function validar(d) {
-  if (!RFC_RE.test(d.rfc)) return "El RFC no es válido: 12 caracteres para empresas, 13 para personas.";
+  if (!RFC_RE.test(d.rfc)) return mensajeRFC(d.rfc);
   if (d.rfc === "XAXX010101000") return "Ese es el RFC genérico de público en general; escribe tu RFC.";
   if (!d.razonSocial || d.razonSocial.length < 3) return "Escribe tu nombre o razón social tal como aparece en tu constancia.";
   if (!/^\d{5}$/.test(d.cp)) return "El código postal fiscal debe tener 5 dígitos.";
@@ -114,7 +124,7 @@ export function formHTML(d = {}, metodo = "") {
   const formas = formasPara(metodo);
   const forma = d.formaPago && formas.includes(d.formaPago) ? d.formaPago : (formas.length === 1 ? formas[0] : "");
   return `
-    <label class="f">RFC<input id="fRfc" value="${esc(d.rfc || "")}" maxlength="13" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XAXX010101000" style="text-transform:uppercase"></label>
+    <label class="f">RFC<input id="fRfc" value="${esc(d.rfc || "")}" maxlength="20" oninput="var v=this.value.toUpperCase().replace(/[^A-Z0-9Ñ&]/g,'').slice(0,13);if(v!==this.value)this.value=v" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XAXX010101000" style="text-transform:uppercase"></label>
     <label class="f">Nombre o razón social <span class="hint">(como en tu constancia de situación fiscal, sin "S.A. de C.V.")</span><input id="fRazon" value="${esc(d.razonSocial || "")}" autocomplete="off"></label>
     <div class="grid2">
       <label class="f">Código postal fiscal<input id="fCp" value="${esc(d.cp || "")}" inputmode="numeric" maxlength="5" autocomplete="off"></label>
